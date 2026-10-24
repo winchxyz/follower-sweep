@@ -1,0 +1,21 @@
+/* Sweep's marks on the rows of your Followers page. Styles only: no clicks, no layout of X's controls. */
+[data-testid="UserCell"][data-sweep] { position: relative; padding-bottom: 30px !important; }
+[data-testid="UserCell"][data-sweep]::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: var(--sweep-c); pointer-events: none;
+}
+[data-testid="UserCell"][data-sweep]::after {
+  content: attr(data-sweep-label); position: absolute; left: 68px; bottom: 8px; max-width: calc(100% - 84px);
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  padding: 1px 9px; border-radius: 999px; background: var(--sweep-c); color: #fff;
+  font: 650 11.5px/18px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; letter-spacing: .01em;
+  pointer-events: none;
+}
+[data-sweep="remove"] { --sweep-c: #d63a1c; }
+[data-sweep="keep"] { --sweep-c: #17784c; }
+[data-sweep="done"] { --sweep-c: #5f5e59; }
+[data-sweep="unknown"] { --sweep-c: #8b8a85; }
+html.sweep-dim [data-testid="UserCell"][data-sweep="keep"],
+html.sweep-dim [data-testid="UserCell"][data-sweep="done"] { opacity: .42; transition: opacity .15s; }
+html.sweep-dim [data-testid="UserCell"][data-sweep="keep"]:hover,
+html.sweep-dim [data-testid="UserCell"][data-sweep="done"]:hover { opacity: 1; }
