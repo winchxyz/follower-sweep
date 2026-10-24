@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { startStubX } from '../dev/stub-x.mjs';
 import { memoryStore, withPrefix } from '../extension/lib/store.js';
 import { createXApi, explainError } from '../extension/lib/xapi.js';
-import { createScanner, loadFollowers } from '../extension/lib/scan.js';
+import { createScanner, loadFollowers, loadList } from '../extension/lib/scan.js';
 import { createApiRemover } from '../extension/lib/apiremove.js';
 import { classify, normalizeRules, prepare, SORTS } from '../extension/lib/rules.js';
 
@@ -182,6 +182,30 @@ test('scans with the app Bearer Token while X refuses user sign-in', async (t) =
   await store.set('app', { clientId: 'demo-client-id-123', bearer: stub.options.appBearer, handle: 'nobody_here' });
   const err = await x.me().then(() => null, (e) => e);
   assert.match(explainError(err), /no account @nobody_here/);
+});
+
+test('scans who you follow and confirms unfollows on the next scan', async (t) => {
+  const { stub, store, x, scanner } = await setup();
+  t.after(() => stub.close());
+  await x.connect();
+  await scanner.run();
+  await scanner.runFollowing();
+  assert.equal(scanner.status.phase, 'done', scanner.status.error);
+  const following = await loadList(store, 'g', 'gmeta');
+  assert.equal(following.length, stub.followingIds.size);
+  const followerIds = new Set((await loadFollowers(store)).map((u) => u.id));
+  const notBack = following.filter((u) => !followerIds.has(u.id));
+  assert.equal(notBack.length, 25); // the stub follows 25 accounts that don't follow back
+  for (const u of following) assert.equal(u.followsYou, followerIds.has(u.id));
+
+  const [gone, stays] = notBack;
+  const at = Date.now() - 1000;
+  await store.setMany({ [`uf:${gone.id}`]: { at, via: 'manual', u: gone.username }, [`uf:${stays.id}`]: { at, via: 'manual', u: stays.username } });
+  stub.followingIds.delete(gone.id);
+  await scanner.runFollowing();
+  const marks = await withPrefix(store, 'uf:');
+  assert.ok(marks.get(gone.id).confirmed);
+  assert.equal(marks.has(stays.id), false);
 });
 
 test('undoes a block left behind by an interrupted run', async (t) => {

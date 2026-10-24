@@ -261,6 +261,7 @@ export async function startStubX(opts = {}) {
     blocked,
     log,
     expire: () => access.forEach((t) => (t.exp = 0)),
+    get followingIds() { return followingIds; },
     close: () => new Promise((resolve) => {
       server.closeAllConnections?.();
       server.close(resolve);

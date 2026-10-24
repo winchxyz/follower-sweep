@@ -72,7 +72,8 @@ const FIX_CSS = `
   .meta { color: #536471; } .meta b { color: #0f1419; }
 `;
 // Stub avatars are plain http; serve them from the stand-in x.com so the https page shows them.
-const pic = (u) => (u.profile_image_url.includes('/avatar/') ? `https://x.com/__avatar/${u.id}.svg` : u.profile_image_url);
+const pic = (u) => (u.profile_image_url?.includes('/avatar/') ? `https://x.com/__avatar/${u.id}.svg` : u.profile_image_url || `https://x.com/__avatar/${u.id}.svg`);
+const extraPages = new Map(); // more stand-in pages, added as the run goes
 const pageHtml = (title, body) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>${FIX_CSS}</style></head><body><main><div data-testid="primaryColumn" class="col">${body}</div></main></body></html>`;
 
 function followersPage(list) {
@@ -198,6 +199,7 @@ try {
   check(data.verdicts?.me === 'sample_account' && Object.keys(data.verdicts.map).length === 1250, 'verdicts published for the content script');
   await ctx.route('https://x.com/**', (route) => {
     const path = new URL(route.request().url()).pathname;
+    if (extraPages.has(path)) return route.fulfill({ contentType: 'text/html', body: extraPages.get(path) });
     const av = /^\/__avatar\/(\d+)\.svg$/.exec(path);
     if (av) return route.fulfill({ contentType: 'image/svg+xml', body: avatarSvg(av[1]) });
     if (path === '/sample_account/followers') return route.fulfill({ contentType: 'text/html', body: followersPage(stub.followers.slice(0, 40)) });
@@ -239,6 +241,43 @@ try {
   await app.waitForSelector('#list .u');
   check((await app.textContent('button[data-view="done"] .cnt')) === '1', 'Removed tab lists it');
   await shot('11-removed.png');
+
+  // Following side: scan who you follow, mark x.com's Following page, notice an unfollow
+  await app.click('button[data-side="following"]');
+  await app.click('button:has-text("Scan who I follow")');
+  await app.waitForSelector('#fsummary .stat', { timeout: 30_000 });
+  const notBack = Number((await app.textContent('#fsummary .stat.rem .n')).replace(/,/g, ''));
+  check(notBack === 25, `Following shows who doesn't follow back (${notBack})`);
+  await shot('19-following.png');
+  await sleep(600);
+  const g = await store();
+  const friends = Object.entries(g.verdicts.gmap).filter(([, v]) => v[1] === 'n').slice(0, 6);
+  const mutuals = Object.entries(g.verdicts.gmap).filter(([, v]) => v[1] === 'b').slice(0, 6);
+  const fake = ([handle, v]) => ({ id: v[0], username: handle, name: handle, profile_image_url: '', description: '', public_metrics: { followers_count: 3, following_count: 900 } });
+  const fixtureUser = ([handle, v]) => stub.followers.find((f) => f.id === v[0]) || fake([handle, v]);
+  extraPages.set('/sample_account/following', pageHtml('People followed by Sample Account', [...friends, ...mutuals].map((e) => {
+    const u = fixtureUser(e);
+    return `<div data-testid="cellInnerDiv"><button data-testid="UserCell" role="button" class="cell"><a href="/${e[0]}" role="link"><img src="${esc(pic(u))}" alt=""></a>
+      <div class="body"><div class="row1"><div><a href="/${e[0]}" role="link" class="nm">${esc(u.name)}</a><div class="hd"><a href="/${e[0]}" role="link">@${e[0]}</a></div></div>
+      <div class="btns"><span class="follow" data-testid="${e[1][0]}-unfollow">Following</span></div></div></div></button></div>`;
+  }).join('')));
+  const [fh, fv] = friends[0];
+  extraPages.set(`/${fh}`, pageHtml(`@${fh}`, `<div class="banner"></div><div class="prof"><div class="acts"><span class="follow" data-testid="${fv[0]}-unfollow">Following</span></div>
+    <div data-testid="UserName"><b>${esc(fh)}</b><div class="hd">@${fh}</div></div></div>`));
+  await xp.goto('https://x.com/sample_account/following');
+  await xp.waitForSelector('[data-testid="UserCell"][data-sweep]');
+  const gm = await xp.$$eval('[data-testid="UserCell"]', (cells) => cells.map((c) => c.dataset.sweep));
+  check(gm.slice(0, 6).every((m) => m === 'remove') && gm.slice(6).every((m) => m === 'keep'), `Following page rows marked (${gm.join(' ')})`);
+  await xp.screenshot({ path: join(SHOTS, '20-x-following.png') });
+  await xp.goto(`https://x.com/${fh}`);
+  await xp.waitForSelector('#sweep-ui');
+  await sleep(700);
+  await xp.evaluate((id) => { document.querySelector(`[data-testid="${id}-unfollow"]`).dataset.testid = `${id}-follow`; }, fv[0]); // what X does after Unfollow
+  await sleep(2600);
+  check((await store())[`uf:${fv[0]}`]?.via === 'detected', `unfollow on the profile is noticed (@${fh})`);
+  await xp.screenshot({ path: join(SHOTS, '21-x-following-profile.png') });
+  await app.bringToFront();
+  await app.click('button[data-side="followers"]');
 
   await app.click('button[data-view="remove"]');
   await app.emulateMedia({ colorScheme: 'dark' });

@@ -39,6 +39,7 @@ Sweep does neither:
 | **Inactivity filter** | "Only remove accounts silent for N days", with a live count of how many accounts that catches. |
 | **Mark on x.com** | Every row on your Followers page gets a red *Remove* or green *Keep* label with the reason. Kept rows fade out. |
 | **One by one** | Opens profiles deadest first, with a bar saying why. It notices when "Follows you" disappears and moves on. |
+| **Following too** | Scans who *you* follow, shows who doesn't follow you back and who looks dead, and marks your Following page on x.com. It notices when you unfollow someone on their profile. You do the unfollowing, since X bans mass auto-unfollowing. |
 | **Verify** | A re-scan confirms who's gone and puts back anyone still following. |
 | **Export** | CSV of everyone with their verdict, safe from spreadsheet formula injection. |
 | **Try first** | A sample mode with 1,250 made-up followers, no X account needed. |

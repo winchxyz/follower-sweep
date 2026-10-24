@@ -177,7 +177,78 @@ export function createScanner({ x, store, onUpdate = () => {}, now = () => Date.
     }
   }
 
-  return { status, run, stop: () => ctrl?.abort() };
+  // The accounts you follow, with the same profile fields, so Sweep can show who
+  // doesn't follow you back and who looks dead. About 4 pages for most accounts,
+  // so it keeps the pages in memory instead of saving each one.
+  async function runFollowing() {
+    if (status.running) return;
+    ctrl = new AbortController();
+    const startedAt = now();
+    set({ running: true, phase: 'profile', error: null, message: 'Reading your profile', found: 0, pages: 0, reads: 0, waitUntil: 0 });
+    try {
+      const me = await x.me();
+      set({ phase: 'following-list', expected: me.following, reads: 1, message: '' });
+      const st = { next: null, fields: [...CORE_FIELDS, 'most_recent_tweet_id'] };
+      const seen = new Set();
+      const users = [];
+      await pageThrough(`/2/users/${me.id}/following`, st, async (data) => {
+        for (const raw of data) {
+          const u = slimUser(raw);
+          if (seen.has(u.id)) continue;
+          seen.add(u.id);
+          users.push(u);
+        }
+        set({ found: users.length, pages: status.pages + 1, reads: status.reads + data.length });
+      });
+      const followerIds = new Set((await loadFollowers(store)).map((u) => u.id));
+      for (const u of users) {
+        u.youFollow = true;
+        u.followsYou = followerIds.size ? followerIds.has(u.id) : null;
+      }
+      await saveList(store, 'g', 'gmeta', users, { userId: me.id, scannedAt: now(), startedAt, followersKnown: followerIds.size > 0 });
+      await reconcileUnfollows(store, users, startedAt, now());
+      set({ phase: 'done', finishedAt: now(), message: '' });
+    } catch (e) {
+      if (e instanceof Stopped) set({ phase: 'paused', message: 'Paused. Scan your following again to start over.' });
+      else set({ phase: 'error', error: explainError(e), message: '' });
+    } finally {
+      set({ running: false, waitUntil: 0 });
+    }
+  }
+
+  return { status, run, runFollowing, stop: () => ctrl?.abort() };
+}
+
+export async function loadList(store, prefix, metaKey) {
+  const meta = await store.get(metaKey);
+  if (!meta) return [];
+  const keys = Array.from({ length: meta.chunks }, (_, i) => `${prefix}:${i}`);
+  const got = await store.getMany(keys);
+  return keys.flatMap((k) => got[k] || []);
+}
+
+export async function saveList(store, prefix, metaKey, users, meta) {
+  const chunks = Math.ceil(users.length / CHUNK);
+  const batch = { [metaKey]: { ...meta, count: users.length, chunks } };
+  for (let c = 0; c < chunks; c++) batch[`${prefix}:${c}`] = users.slice(c * CHUNK, (c + 1) * CHUNK);
+  await store.setMany(batch);
+  const stale = (await store.keys()).filter((k) => k.startsWith(`${prefix}:`) && Number(k.slice(prefix.length + 1)) >= chunks);
+  if (stale.length) await store.remove(stale);
+}
+
+// Unfollow marks (uf:<id>): gone from the new list means confirmed; still there means it didn't happen.
+export async function reconcileUnfollows(store, users, startedAt, at = Date.now()) {
+  const ids = new Set(users.map((u) => u.id));
+  const marks = await withPrefix(store, 'uf:');
+  const updates = {};
+  const drop = [];
+  for (const [id, r] of marks) {
+    if (r.at >= startedAt) continue;
+    if (ids.has(id)) drop.push(`uf:${id}`);
+    else if (!r.confirmed) updates[`uf:${id}`] = { ...r, confirmed: at };
+  }
+  if (drop.length) await store.remove(drop);
+  if (Object.keys(updates).length) await store.setMany(updates);
 }
 
 // After a scan: accounts you marked as removed that are gone are confirmed;

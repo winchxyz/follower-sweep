@@ -2,7 +2,7 @@
 // API removal. Everything that talks to X goes through lib/xapi.js.
 import { chromeStore, withPrefix } from './lib/store.js';
 import { createXApi, explainError, X_AUTH_BASE, X_API_BASE } from './lib/xapi.js';
-import { createScanner, loadFollowers, saveFollowers, slimUser } from './lib/scan.js';
+import { createScanner, loadFollowers, saveFollowers, loadList, saveList, slimUser } from './lib/scan.js';
 import { createApiRemover, API_DEFAULTS } from './lib/apiremove.js';
 import { normalizeRules, classify, reasonText, checkKind, lastPostAt, prepare, SORTS } from './lib/rules.js';
 import { sampleFollowers, SAMPLE_ME } from './lib/demo.js';
@@ -35,13 +35,18 @@ const S = {
   users: [], byId: new Map(), keep: new Map(), removed: new Map(), pend: new Map(),
   rules: normalizeRules(), cfg: { dimKeepers: true, method: 'page', reconcileSeen: 0, ...API_DEFAULTS },
   view: 'remove', q: '', sort: 'dead', limit: PAGE,
+  // The Following side: who you follow, and who doesn't follow you back.
+  side: 'followers', gmeta: null, following: [], unf: new Map(), fview: 'notback', fq: '', fsort: 'dead', flimit: PAGE,
 };
+let G = { version: 0, notback: [], back: [], counts: { total: 0, notback: 0, back: 0, dead: 0 } };
 let D = { version: 0, cls: new Map(), remove: [], keep: [], counts: { total: 0, keep: 0, remove: 0, reasons: {}, kinds: {} } };
 
 // ---------- data ----------
 
 async function loadAll() {
-  const got = await store.getMany(['app', 'auth', 'me', 'fmeta', 'rules', 'cfg', 'demo', 'lastReconcile', 'scan']);
+  const got = await store.getMany(['app', 'auth', 'me', 'fmeta', 'gmeta', 'rules', 'cfg', 'demo', 'lastReconcile', 'scan']);
+  S.gmeta = got.gmeta || null;
+  S.following = prepare(await loadList(store, 'g', 'gmeta'));
   S.app = got.app || null;
   S.auth = got.auth || null;
   S.mode = S.auth ? 'user' : S.app?.bearer ? 'app' : null;
@@ -59,8 +64,24 @@ async function loadAll() {
 }
 
 async function loadMarks() {
-  [S.removed, S.keep, S.pend] = await Promise.all([withPrefix(store, 'rm:'), withPrefix(store, 'keep:'), withPrefix(store, 'pend:')]);
+  [S.removed, S.keep, S.pend, S.unf] = await Promise.all([withPrefix(store, 'rm:'), withPrefix(store, 'keep:'), withPrefix(store, 'pend:'), withPrefix(store, 'uf:')]);
   derive();
+}
+
+const looksDead = (u) => u._sig.some((s) => s.key === 'noposts' || s.key === 'stale');
+
+// Following side: "follows you" comes from the current follower scan, so it stays right after a re-scan.
+function deriveFollowing() {
+  const known = S.users.length > 0;
+  const notback = [], back = [];
+  let dead = 0;
+  for (const u of S.following) {
+    u.followsYou = known ? S.byId.has(u.id) : null;
+    if (S.unf.has(u.id)) continue;
+    (u.followsYou === false ? notback : back).push(u);
+    if (u.followsYou === false && looksDead(u)) dead++;
+  }
+  G = { version: G.version + 1, notback, back, counts: { total: S.following.length, notback: notback.length, back: back.length, dead } };
 }
 
 function derive() {
@@ -89,6 +110,7 @@ function derive() {
     if (c.reason === 'verified') counts.kinds[checkKind(u)]++;
   }
   D = { version: D.version + 1, cls, remove, keep, counts };
+  deriveFollowing();
   publishSoon();
 }
 
@@ -107,7 +129,7 @@ function publishSoon() {
 }
 async function publish() {
   if (S.demo || !S.me || !S.fmeta || S.fmeta.userId !== S.me.id) {
-    await store.remove(['verdicts', 'queue']);
+    await store.remove(['verdicts', 'queue', 'gqueue']);
     return;
   }
   const map = {};
@@ -117,7 +139,20 @@ async function publish() {
     map[u.username.toLowerCase()] = [u.id, code, c.reason, u.followers, verdictLabel(u, c, code)];
   }
   const queue = queueOrder().map((u) => [u.username.toLowerCase(), u.id]);
-  await store.setMany({ verdicts: { me: S.me.username.toLowerCase(), at: Date.now(), map }, queue });
+  // Following side: n = doesn't follow you back, b = follows back, u = marked unfollowed.
+  const gmap = {};
+  for (const u of S.following) {
+    const code = S.unf.has(u.id) ? 'u' : u.followsYou === false ? 'n' : 'b';
+    gmap[u.username.toLowerCase()] = [u.id, code, followingLabel(u, code)];
+  }
+  const gqueue = [...G.notback].sort(SORTS.dead.cmp).map((u) => [u.username.toLowerCase(), u.id]);
+  await store.setMany({ verdicts: { me: S.me.username.toLowerCase(), at: Date.now(), map, gmap }, queue, gqueue });
+}
+function followingLabel(u, code) {
+  if (code === 'u') return 'Marked unfollowed';
+  if (code === 'b') return 'Follows you back';
+  const hints = u._sig.filter((s) => s.key !== 'tiny').slice(0, 2).map((s) => s.label);
+  return ["Doesn't follow you back", ...hints].join(' · ');
 }
 function verdictLabel(u, c, code) {
   if (code === 'd') return 'Marked removed';
@@ -130,7 +165,7 @@ let marksTimer = 0;
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !S.loaded) return;
   const keys = Object.keys(changes);
-  if (keys.some((k) => /^(rm|keep|pend):/.test(k))) {
+  if (keys.some((k) => /^(rm|keep|pend|uf):/.test(k))) {
     clearTimeout(marksTimer);
     marksTimer = setTimeout(async () => {
       await loadMarks();
@@ -186,10 +221,11 @@ const plural = (n, one, many = one + 's') => `${fmtInt(n)} ${n === 1 ? one : man
 
 function screenName() {
   if (!S.loaded) return 'loading';
-  if (S.demo) return 'review';
+  const side = S.side === 'following' ? 'following' : 'review';
+  if (S.demo) return side;
   if ((!S.app?.clientId && !S.app?.bearer) || S.editingApp) return 'setup';
   if (scanner.status.running) return 'scan';
-  if (S.fmeta && (!S.me || S.fmeta.userId === S.me.id)) return 'review';
+  if (S.fmeta && (!S.me || S.fmeta.userId === S.me.id)) return side;
   return S.mode && S.me ? 'scan' : 'connect';
 }
 
@@ -301,7 +337,25 @@ const FRAME = {
 
   scan: () => '<section class="card step"><p class="eyebrow">Set up · 3 of 3</p><div id="scanbox"></div></section>',
 
+  following: () => `
+<div class="side" id="side"></div>
+<section id="fsummary" class="summary"></section>
+<div class="work fwork">
+  <section class="card methods"><div class="mbody" id="fmethod"></div></section>
+  <section class="card listcard" id="flistcard">
+    <div class="listbar">
+      <div class="tabs" id="ftabs" role="tablist" aria-label="List"></div>
+      <div class="tools">
+        <input id="fq" class="search" type="search" placeholder="Search name, @handle or bio" value="${esc(S.fq)}" aria-label="Search">
+        <select id="fsort" class="sel" aria-label="Sort">${Object.entries(SORTS).map(([k, s]) => `<option value="${k}"${k === S.fsort ? ' selected' : ''}>${k === 'recent' ? 'Followed most recently' : s.label}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div id="flist"></div>
+  </section>
+</div>`,
+
   review: () => `
+<div class="side" id="side"></div>
 <section id="summary" class="summary"></section>
 <div class="review">
   <aside class="card rules">${rulesHtml()}</aside>
@@ -331,7 +385,16 @@ const FILL = {
   scan() {
     patch($('#scanbox'), scanBoxHtml());
   },
+  following() {
+    patch($('#side'), sideHtml());
+    patch($('#fsummary'), fsummaryHtml());
+    patch($('#fmethod'), fmethodHtml());
+    $('#flistcard').hidden = !S.gmeta;
+    patch($('#ftabs'), ftabsHtml());
+    patch($('#flist'), flistHtml());
+  },
   review() {
+    patch($('#side'), sideHtml());
     patch($('#summary'), summaryHtml());
     updateCounts();
     patch($('#mtabs'), mtabsHtml());
@@ -350,8 +413,9 @@ function scanBoxHtml() {
   if (st.running) {
     const pct = n ? Math.min(100, (st.found / n) * 100) : 0;
     const secs = st.waitUntil ? ` (${Math.max(0, Math.ceil((st.waitUntil - Date.now()) / 1000))} s)` : '';
-    const phase = st.phase === 'following' ? 'Checking whom you follow back' : st.phase === 'profile' ? 'Reading your profile' : 'Reading followers';
-    return `${head}<h1>Scanning your followers</h1>
+    const listing = st.phase === 'following-list';
+    const phase = listing ? 'Reading who you follow' : st.phase === 'following' ? 'Checking whom you follow back' : st.phase === 'profile' ? 'Reading your profile' : 'Reading followers';
+    return `${head}<h1>${listing ? 'Scanning who you follow' : 'Scanning your followers'}</h1>
       <div class="progress"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
         <p class="pmeta"><b>${fmtInt(st.found)}</b> of about ${fmtInt(n)} read · ${esc(st.message || phase)}${secs}</p>
         <p class="pmeta muted">About ${fmtUsd(st.reads * readPrice())} so far${S.mode === 'app' ? '' : ' at the owned-read rate'}. Closing this tab pauses the scan; it picks up where it stopped.</p>
@@ -555,6 +619,100 @@ function doneRow([id, r]) {
     <div class="act">${r.confirmed ? '' : `<button class="btn sm" data-act="unmark" data-id="${esc(id)}">Undo</button>`}</div></div>`;
 }
 
+// ---------- Following side ----------
+
+function sideHtml() {
+  const b = (k, label, n) => `<button role="tab" aria-selected="${S.side === k}" data-act="side" data-side="${k}">${label}${n != null ? `<span class="cnt">${fmtInt(n)}</span>` : ''}</button>`;
+  return `<div class="tabs side-tabs">${b('followers', 'Followers', S.users.length)}${b('following', 'Following', S.gmeta ? S.following.length : null)}</div>`;
+}
+
+function fsummaryHtml() {
+  if (!S.gmeta) return '';
+  const c = G.counts;
+  const stat = (cls, n, label) => `<div class="stat ${cls}"><span class="n">${fmtInt(n)}</span><span class="l">${label}</span></div>`;
+  const info = S.demo
+    ? '<span>Sample data, nothing was read from X.</span>'
+    : `<span>Scanned ${ago(Date.now() - S.gmeta.scannedAt)}. A re-scan confirms unfollows.</span>${S.mode ? '<button class="btn sm" data-act="scan-following">Re-scan following</button>' : ''}`;
+  return stat('', c.total, 'you follow') + stat('rem', c.notback, "don't follow back") + stat('', c.dead, 'of them look dead') + stat('done', S.unf.size, 'unfollowed') + `<div class="scaninfo">${info}</div>`;
+}
+
+function fmethodHtml() {
+  const off = S.demo ? ' disabled' : '';
+  if (!S.gmeta) {
+    const n = S.me?.following || 0;
+    return `<h2>Who you follow</h2>
+      <p>Sweep reads the ${fmtInt(n)} accounts you follow, then shows who doesn't follow you back and who looks dead. That's ${fmtInt(n)} reads, about ${fmtUsd(n * readPrice())}.</p>
+      <div class="actions"><button class="btn primary" data-act="scan-following"${off || (S.mode ? '' : ' disabled')}>Scan who I follow</button>${S.mode ? '' : '<span class="fine">Sign in or add the Bearer Token first.</span>'}</div>`;
+  }
+  return `<p>Open your Following list on X and Sweep marks every row: <span class="pill rem">Doesn't follow back</span> or <span class="pill keep">Follows back</span>. To unfollow, click the <b>Following</b> button on the row, then <b>Unfollow</b>.</p>
+    <div class="actions"><button class="btn primary" data-act="open-following"${off}>Open my Following on X</button>
+      ${G.notback.length ? `<button class="btn" data-act="fqueue-start"${off}>One by one, deadest first</button>` : ''}</div>
+    <p class="fine">X bans mass and automatic unfollowing, especially of people who don't follow back, so Sweep never unfollows for you. Unfollows show up here after a re-scan, or right away when you use "One by one".</p>${S.demo ? '<p class="fine">Sample mode: these buttons are off because the sample accounts don\'t exist on X.</p>' : ''}`;
+}
+
+function ftabsHtml() {
+  const t = (k, label, n) => `<button role="tab" aria-selected="${S.fview === k}" data-act="fview" data-fview="${k}">${label}<span class="cnt">${fmtInt(n)}</span></button>`;
+  return t('notback', "Don't follow back", G.notback.length) + t('back', 'Follow back', G.back.length) + t('done', 'Unfollowed', S.unf.size);
+}
+
+let flistCache = null;
+function flistItems() {
+  const q = S.fq.trim().toLowerCase();
+  const key = `${G.version}|${S.fview}|${q}|${S.fsort}|${S.unf.size}`;
+  if (flistCache?.key === key) return flistCache.items;
+  const hit = (u) => u.username.toLowerCase().includes(q) || u.name.toLowerCase().includes(q) || u.bio.toLowerCase().includes(q);
+  const base = S.fview === 'done' ? S.following.filter((u) => S.unf.has(u.id)) : S.fview === 'back' ? G.back : G.notback;
+  const items = (q ? base.filter(hit) : base.slice()).sort(SORTS[S.fsort].cmp);
+  flistCache = { key, items };
+  return items;
+}
+
+function flistHtml() {
+  if (!S.gmeta) return '';
+  const items = flistItems();
+  if (!items.length) {
+    const why = S.fq ? `No match for “${esc(S.fq)}”.` : { notback: 'Everyone you follow follows you back.', back: 'Nobody here yet.', done: 'Nothing unfollowed yet.' }[S.fview];
+    return `<div class="empty">${why}</div>`;
+  }
+  const rows = items.slice(0, S.flimit).map(followingRow).join('');
+  const rest = items.length - S.flimit;
+  return rows + (rest > 0 ? `<div class="more"><button class="btn" data-act="fmore">Show ${fmtInt(Math.min(PAGE, rest))} more (${fmtInt(rest)} left)</button></div>` : '');
+}
+
+function followingRow(u) {
+  const kind = checkKind(u);
+  const lp = lastPostAt(u);
+  const last = u.posts === 0 ? 'never' : lp == null ? 'hidden' : ago(Date.now() - lp);
+  const mark = S.unf.get(u.id);
+  const rel = u.followsYou == null ? '' : u.followsYou ? '<span class="pill keep">Follows you</span>' : '<span class="pill rem">Doesn\'t follow back</span>';
+  const chips = u._sig.filter((s) => s.key !== 'tiny').slice(0, 3).map((s) => `<span class="chip">${esc(s.label)}</span>`).join('');
+  const state = mark ? `<span class="chip${mark.confirmed ? ' ok' : ''}">${mark.confirmed ? 'unfollow confirmed' : 'marked unfollowed, re-scan to confirm'}</span>` : '';
+  const btn = mark
+    ? (mark.confirmed ? '' : `<button class="btn sm" data-act="unmark-unf" data-id="${esc(u.id)}">Undo</button>`)
+    : `<button class="btn sm" data-act="mark-unf" data-id="${esc(u.id)}">Mark unfollowed</button>`;
+  return `<div class="u">${avatar(u.avatar, '', u.username)}
+    <div class="who"><div class="nm">${profile(u.username, esc(u.name || u.username))}${kind ? CHECK(kind) : ''}${u.protected ? LOCK : ''}</div>
+      <div class="hd">@${esc(u.username)}${u.bio ? ` · ${esc(u.bio)}` : ''}</div><div class="why">${rel}${chips}${state}</div></div>
+    <div class="num keepme"><b>${fmtCompact(u.followers)}</b><span>followers</span></div>
+    <div class="num"><b>${fmtCompact(u.posts)}</b><span>posts</span></div>
+    <div class="num"><b>${esc(last)}</b><span>last post</span></div>
+    <div class="act">${btn}</div></div>`;
+}
+
+async function doScanFollowing() {
+  if (scanner.status.running) return;
+  const run = scanner.runFollowing();
+  schedule();
+  await run;
+  await loadAll();
+  if (scanner.status.phase === 'done') {
+    S.side = 'following';
+    S.fview = 'notback';
+    S.flimit = PAGE;
+    toast(`Read ${fmtInt(S.following.length)} accounts you follow`);
+  }
+}
+
 function footHtml(sc) {
   const links = [];
   if (S.auth && !S.demo) links.push('<button class="linkbtn" data-act="disconnect">Disconnect X</button>');
@@ -625,6 +783,11 @@ async function startSample() {
   quiet.slice(0, 4).forEach((u, i) => (marks[`rm:${u.id}`] = { at: now - (i + 1) * 3_600_000, via: i % 2 ? 'detected' : 'manual', u: u.username, n: u.name, a: u.avatar, ...(i < 2 ? { confirmed: now - 1_800_000 } : {}) }));
   const friendly = users.filter((u) => !u.verified && u.followers < 500 && u.posts > 100 && !u.youFollow);
   friendly.slice(0, 2).forEach((u) => (marks[`keep:${u.id}`] = { at: now, u: u.username }));
+  // Sample following: the followers you follow back, plus accounts that don't follow you.
+  const strangers = sampleFollowers({ count: 230, seed: 11, now }).map((raw, i) => slimUser({ ...raw, id: String(9_000_000_000_000 + i), username: `${raw.username.slice(0, 13)}x${i % 10}` }));
+  const following = [...users.filter((u) => u.youFollow), ...strangers].map((u) => ({ ...u, youFollow: true }));
+  await saveList(store, 'g', 'gmeta', following, { userId: SAMPLE_ME.id, scannedAt: now - 3_600_000, startedAt: now - 3_600_000, followersKnown: true });
+  strangers.slice(0, 3).forEach((u) => (marks[`uf:${u.id}`] = { at: now - 600_000, via: 'manual', u: u.username }));
   await store.setMany(marks);
   S.editingApp = false;
   S.flash = null;
@@ -676,6 +839,33 @@ const ACT = {
   },
   more() {
     S.limit += PAGE;
+  },
+  side(el) {
+    S.side = el.dataset.side;
+  },
+  fview(el) {
+    S.fview = el.dataset.fview;
+    S.flimit = PAGE;
+  },
+  fmore() {
+    S.flimit += PAGE;
+  },
+  'scan-following': () => doScanFollowing(),
+  'open-following'() {
+    openTab(`https://x.com/${encodeURIComponent(S.me.username)}/following`);
+  },
+  'fqueue-start'() {
+    const first = [...G.notback].sort(SORTS.dead.cmp)[0];
+    if (first) openTab(`https://x.com/${encodeURIComponent(first.username)}`);
+  },
+  async 'mark-unf'(el) {
+    const u = S.following.find((f) => f.id === el.dataset.id);
+    await store.set(`uf:${el.dataset.id}`, { at: Date.now(), via: 'manual', u: u?.username || '' });
+    await loadMarks();
+  },
+  async 'unmark-unf'(el) {
+    await store.remove(`uf:${el.dataset.id}`);
+    await loadMarks();
   },
   'open-followers'() {
     openTab(`https://x.com/${encodeURIComponent(S.me.username)}/followers`);
@@ -770,11 +960,17 @@ document.addEventListener('click', async (e) => {
 
 let qTimer = 0;
 document.addEventListener('input', (e) => {
-  if (e.target.id !== 'q') return;
+  const id = e.target.id;
+  if (id !== 'q' && id !== 'fq') return;
   clearTimeout(qTimer);
   qTimer = setTimeout(() => {
-    S.q = e.target.value;
-    S.limit = PAGE;
+    if (id === 'q') {
+      S.q = e.target.value;
+      S.limit = PAGE;
+    } else {
+      S.fq = e.target.value;
+      S.flimit = PAGE;
+    }
     schedule();
   }, 120);
 });
@@ -795,6 +991,9 @@ document.addEventListener('change', async (e) => {
     if (el.type !== 'checkbox') el.value = v;
     S.cfg[key] = v;
     await saveCfg();
+  } else if (el.id === 'fsort') {
+    S.fsort = el.value;
+    S.flimit = PAGE;
   } else if (el.id === 'sort') {
     S.sort = el.value;
     S.limit = PAGE;

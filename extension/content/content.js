@@ -8,7 +8,7 @@
   window.__sweepLoaded = true;
 
   const area = chrome.storage.local;
-  const S = { me: '', map: null, queue: [], dim: true, path: null };
+  const S = { me: '', map: null, gmap: {}, queue: [], gqueue: [], dim: true, path: null, rows: '' };
   let P = null; // the follower profile on screen: { handle, id, code, label, marked, kept }
   let observer = null;
   let watch = 0;
@@ -44,10 +44,12 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
   async function load() {
-    const got = await area.get(['verdicts', 'queue', 'cfg']);
+    const got = await area.get(['verdicts', 'queue', 'gqueue', 'cfg']);
     S.me = got.verdicts?.me || '';
     S.map = got.verdicts?.map || null;
+    S.gmap = got.verdicts?.gmap || {};
     S.queue = Array.isArray(got.queue) ? got.queue : [];
+    S.gqueue = Array.isArray(got.gqueue) ? got.gqueue : [];
     S.dim = got.cfg?.dimKeepers !== false;
     document.documentElement.classList.toggle('sweep-dim', S.dim);
     S.path = null;
@@ -61,8 +63,11 @@
     teardown();
     if (!S.map || !S.me) return;
     const seg = path.split('/').filter(Boolean).map((s) => s.toLowerCase());
+    const onProfile = seg.length >= 1 && seg[0] !== S.me && (seg.length === 1 || ['with_replies', 'media', 'highlights', 'articles'].includes(seg[1]));
     if (seg.length === 2 && seg[0] === S.me && (seg[1] === 'followers' || seg[1] === 'verified_followers')) followersPage();
-    else if (seg.length >= 1 && seg[0] !== S.me && S.map[seg[0]] && (seg.length === 1 || ['with_replies', 'media', 'highlights', 'articles'].includes(seg[1]))) profilePage(seg[0]);
+    else if (seg.length === 2 && seg[0] === S.me && seg[1] === 'following') followingPage();
+    else if (onProfile && S.map[seg[0]]) profilePage(seg[0]);
+    else if (onProfile && S.gmap[seg[0]]) followingProfile(seg[0]);
   }
 
   function teardown() {
@@ -98,7 +103,7 @@
 
   // ---- Followers page: colour every row ----
 
-  function followersPage() {
+  function watchRows() {
     annotate();
     let queued = false;
     const mo = new MutationObserver(() => {
@@ -111,6 +116,11 @@
     });
     observer = mo;
     mo.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function followersPage() {
+    S.rows = 'followers';
+    watchRows();
     let r = 0, k = 0;
     for (const v of Object.values(S.map)) {
       if (v[1] === 'r') r++;
@@ -129,13 +139,36 @@
     return '';
   }
 
+  // Your Following page: red when they don't follow you back. The Unfollow click is yours.
+  function followingPage() {
+    S.rows = 'following';
+    watchRows();
+    let n = 0, b = 0;
+    for (const v of Object.values(S.gmap)) {
+      if (v[1] === 'n') n++;
+      else if (v[1] === 'b') b++;
+    }
+    mount(`${LOGO}<div class="txt"><div class="line"><b>Sweep</b> · <span class="tag r">NO FOLLOW-BACK</span>${n.toLocaleString('en-US')} <span class="tag k">FOLLOWS YOU</span>${b.toLocaleString('en-US')}</div>
+      <div class="hint line">On a red row: Following → Unfollow. Re-scan who you follow in Sweep afterwards.</div></div>
+      <div class="btns"><label><input type="checkbox" data-dim${S.dim ? ' checked' : ''}> Fade green</label><button data-do="app">Open Sweep</button><button class="x" data-do="hide" title="Hide">×</button></div>`);
+  }
+
+  function verdictFor(handle) {
+    if (S.rows === 'following') {
+      const v = S.gmap[handle];
+      return v ? [v[1] === 'n' ? 'remove' : v[1] === 'u' ? 'done' : 'keep', v[2]] : null;
+    }
+    const v = S.map[handle];
+    return v ? [v[1] === 'r' ? 'remove' : v[1] === 'd' ? 'done' : 'keep', v[4]] : null;
+  }
+
   function annotate() {
     const column = document.querySelector('[data-testid="primaryColumn"]') || document.querySelector('main') || document;
     for (const cell of column.querySelectorAll('[data-testid="UserCell"]')) {
       const handle = cellHandle(cell);
-      const v = handle ? S.map[handle] : null;
-      const state = !v ? 'unknown' : v[1] === 'r' ? 'remove' : v[1] === 'd' ? 'done' : 'keep';
-      const label = v ? v[4] : 'Sweep: not in your last scan';
+      const v = handle ? verdictFor(handle) : null;
+      const state = v ? v[0] : 'unknown';
+      const label = v ? v[1] : 'Sweep: not in your last scan';
       if (cell.dataset.sweep !== state) cell.dataset.sweep = state;
       if (cell.dataset.sweepLabel !== label) cell.dataset.sweepLabel = label;
     }
@@ -218,11 +251,83 @@
     return null;
   }
 
+  // ---- A profile you follow (and that doesn't follow you): unfollow by hand ----
+
+  async function followingProfile(handle) {
+    const v = S.gmap[handle];
+    P = { kind: 'g', handle, id: v[0], code: v[1], label: v[2], marked: null };
+    await refreshFollowing();
+    if (P?.code === 'n') watchUnfollow(P);
+  }
+
+  async function refreshFollowing() {
+    if (!P || P.kind !== 'g') return;
+    const p = P;
+    const got = await area.get(`uf:${p.id}`);
+    if (P !== p) return;
+    p.marked = got[`uf:${p.id}`]?.via || null;
+    p.next = await nextUnfollow(p.handle);
+    if (P !== p) return;
+    const nextBtn = p.next ? `<button class="go" data-do="next">Next: @${esc(p.next)} →</button>` : '<button data-do="app">Open Sweep</button>';
+    let html;
+    if (p.marked) {
+      html = `<div class="txt"><div class="line"><span class="tag d">UNFOLLOWED</span><b>@${esc(p.handle)}</b> ${p.marked === 'detected' ? 'unfollowed' : 'marked as unfollowed'}</div>
+        <div class="hint line">A re-scan of who you follow confirms it.</div></div><div class="btns"><button data-do="undo-unf">Undo</button>${nextBtn}</div>`;
+    } else if (p.code === 'b') {
+      html = `<div class="txt"><div class="line"><span class="tag k">FOLLOWS YOU</span><b>@${esc(p.handle)}</b> follows you back</div>
+        <div class="hint line">You follow each other.</div></div><div class="btns">${nextBtn}</div>`;
+    } else {
+      html = `<div class="txt"><div class="line"><span class="tag r">NO FOLLOW-BACK</span><b>@${esc(p.handle)}</b> · ${esc(p.label.replace(/^Doesn't follow you back( · )?/, '') || "doesn't follow you back")}</div>
+        <div class="hint line">Here: Following → Unfollow, then Next.</div></div>
+        <div class="btns"><button data-do="mark-unf">Mark unfollowed</button>${p.next ? '<button data-do="next">Skip →</button>' : ''}</div>`;
+    }
+    mount(LOGO + html);
+  }
+
+  // X's own follow button carries "<user id>-unfollow" while you follow them and
+  // "<user id>-follow" after. Seen the first, then the second for 1.5 s: you unfollowed.
+  function watchUnfollow(p) {
+    let seen = false;
+    let flippedAt = 0;
+    watch = setInterval(async () => {
+      if (P !== p) return;
+      if (document.querySelector(`[data-testid="${p.id}-unfollow"]`)) {
+        seen = true;
+        flippedAt = 0;
+        if (p.marked === 'detected') await area.remove(`uf:${p.id}`);
+        return;
+      }
+      if (!seen || p.marked || !document.querySelector(`[data-testid="${p.id}-follow"]`)) return;
+      if (!flippedAt) flippedAt = Date.now();
+      else if (Date.now() - flippedAt > 1500) {
+        p.marked = 'detected';
+        await area.set({ [`uf:${p.id}`]: { at: Date.now(), via: 'detected', u: p.handle } });
+      }
+    }, 500);
+  }
+
+  async function nextUnfollow(handle) {
+    const q = S.gqueue;
+    for (let i = q.findIndex(([h]) => h === handle) + 1; i < q.length; i += 25) {
+      const slice = q.slice(i, i + 25).filter(([h]) => h !== handle);
+      const got = await area.get(slice.map(([, id]) => `uf:${id}`));
+      const hit = slice.find(([, id]) => !got[`uf:${id}`]);
+      if (hit) return hit[0];
+    }
+    return null;
+  }
+
   async function onClick(e) {
     const el = e.target.closest('[data-do]');
     if (!el) return;
     const p = P;
     switch (el.dataset.do) {
+      case 'mark-unf':
+        if (p) await area.set({ [`uf:${p.id}`]: { at: Date.now(), via: 'manual', u: p.handle } });
+        break;
+      case 'undo-unf':
+        if (p) await area.remove(`uf:${p.id}`);
+        break;
       case 'app':
         chrome.runtime.sendMessage({ type: 'open-app' });
         break;
@@ -257,8 +362,9 @@
 
   chrome.storage.onChanged.addListener((changes, name) => {
     if (name !== 'local') return;
-    if (changes.verdicts || changes.queue || changes.cfg) return void load();
-    if (P && (changes[`rm:${P.id}`] || changes[`keep:${P.id}`])) refreshProfile();
+    if (changes.verdicts || changes.queue || changes.gqueue || changes.cfg) return void load();
+    if (P?.kind === 'g' && changes[`uf:${P.id}`]) refreshFollowing();
+    else if (P && (changes[`rm:${P.id}`] || changes[`keep:${P.id}`])) refreshProfile();
   });
 
   setInterval(route, 400);
