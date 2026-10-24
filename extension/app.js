@@ -4,7 +4,7 @@ import { chromeStore, withPrefix } from './lib/store.js';
 import { createXApi, explainError, X_AUTH_BASE, X_API_BASE } from './lib/xapi.js';
 import { createScanner, loadFollowers, saveFollowers, loadList, saveList, slimUser } from './lib/scan.js';
 import { createApiRemover, API_DEFAULTS } from './lib/apiremove.js';
-import { normalizeRules, classify, reasonText, checkKind, lastPostAt, prepare, SORTS } from './lib/rules.js';
+import { normalizeRules, classify, reasonText, checkKind, isVerified, lastPostAt, prepare, SORTS } from './lib/rules.js';
 import { sampleFollowers, SAMPLE_ME } from './lib/demo.js';
 import { esc, fmtInt, fmtCompact, fmtUsd, fmtDuration, ago, clampInt } from './lib/util.js';
 
@@ -36,7 +36,7 @@ const S = {
   rules: normalizeRules(), cfg: { dimKeepers: true, method: 'page', reconcileSeen: 0, ...API_DEFAULTS },
   view: 'remove', q: '', sort: 'dead', limit: PAGE,
   // The Following side: who you follow, and who doesn't follow you back.
-  side: 'followers', gmeta: null, following: [], unf: new Map(), fview: 'notback', fq: '', fsort: 'dead', flimit: PAGE,
+  side: 'followers', gmeta: null, following: [], unf: new Map(), fview: 'notback', fq: '', fsort: 'dead', flimit: PAGE, frules: null,
 };
 let G = { version: 0, notback: [], back: [], counts: { total: 0, notback: 0, back: 0, dead: 0 } };
 let D = { version: 0, cls: new Map(), remove: [], keep: [], counts: { total: 0, keep: 0, remove: 0, reasons: {}, kinds: {} } };
@@ -44,8 +44,9 @@ let D = { version: 0, cls: new Map(), remove: [], keep: [], counts: { total: 0, 
 // ---------- data ----------
 
 async function loadAll() {
-  const got = await store.getMany(['app', 'auth', 'me', 'fmeta', 'gmeta', 'rules', 'cfg', 'demo', 'lastReconcile', 'scan']);
+  const got = await store.getMany(['app', 'auth', 'me', 'fmeta', 'gmeta', 'rules', 'frules', 'cfg', 'demo', 'lastReconcile', 'scan']);
   S.gmeta = got.gmeta || null;
+  S.frules = normalizeFrules(got.frules);
   S.following = prepare(await loadList(store, 'g', 'gmeta'));
   S.app = got.app || null;
   S.auth = got.auth || null;
@@ -70,18 +71,54 @@ async function loadMarks() {
 
 const looksDead = (u) => u._sig.some((s) => s.key === 'noposts' || s.key === 'stale');
 
+// Rules for the Following side. Everyone not kept by one of them is a candidate to unfollow.
+const DEFAULT_FRULES = { keepBack: true, keepVerified: false, minOn: false, minFollowers: 5000, inactiveOn: false, inactiveDays: 90 };
+function normalizeFrules(r = {}) {
+  const d = DEFAULT_FRULES;
+  const b = (v, dv) => (v === undefined ? dv : Boolean(v));
+  return {
+    keepBack: b(r.keepBack, d.keepBack), keepVerified: b(r.keepVerified, d.keepVerified),
+    minOn: b(r.minOn, d.minOn), minFollowers: clampInt(r.minFollowers, 1, 1e9, d.minFollowers),
+    inactiveOn: b(r.inactiveOn, d.inactiveOn), inactiveDays: clampInt(r.inactiveDays, 1, 3650, d.inactiveDays),
+  };
+}
+
+const isSilent = (u, days, now) => {
+  const last = lastPostAt(u);
+  return u.posts === 0 || (last != null && now - last >= days * 86_400_000);
+};
+
+function classifyFollowing(u, r, now, skipInactive = false) {
+  if (r.keepBack && u.followsYou !== false) return 'back';
+  if (r.keepVerified && isVerified(u)) return 'verified';
+  if (r.minOn && u.followers >= r.minFollowers) return 'followers';
+  if (!skipInactive && r.inactiveOn && !isSilent(u, r.inactiveDays, now)) return 'active';
+  return 'unfollow';
+}
+
 // Following side: "follows you" comes from the current follower scan, so it stays right after a re-scan.
 function deriveFollowing() {
   const known = S.users.length > 0;
-  const notback = [], back = [];
-  let dead = 0;
+  const now = Date.now();
+  const r = S.frules || normalizeFrules();
+  const notback = [], back = [], reasons = {};
+  let dead = 0, silent = 0, notFollowing = 0;
   for (const u of S.following) {
     u.followsYou = known ? S.byId.has(u.id) : null;
     if (S.unf.has(u.id)) continue;
-    (u.followsYou === false ? notback : back).push(u);
-    if (u.followsYou === false && looksDead(u)) dead++;
+    if (u.followsYou === false) notFollowing++;
+    if (classifyFollowing(u, r, now, true) === 'unfollow' && isSilent(u, r.inactiveDays, now)) silent++;
+    const why = classifyFollowing(u, r, now);
+    u._fwhy = why;
+    if (why === 'unfollow') {
+      notback.push(u);
+      if (looksDead(u)) dead++;
+    } else {
+      back.push(u);
+      reasons[why] = (reasons[why] || 0) + 1;
+    }
   }
-  G = { version: G.version + 1, notback, back, counts: { total: S.following.length, notback: notback.length, back: back.length, dead } };
+  G = { version: G.version + 1, notback, back, counts: { total: S.following.length, notback: notback.length, back: back.length, notFollowing, dead, silent, reasons } };
 }
 
 function derive() {
@@ -142,7 +179,7 @@ async function publish() {
   // Following side: n = doesn't follow you back, b = follows back, u = marked unfollowed.
   const gmap = {};
   for (const u of S.following) {
-    const code = S.unf.has(u.id) ? 'u' : u.followsYou === false ? 'n' : 'b';
+    const code = S.unf.has(u.id) ? 'u' : u._fwhy === 'unfollow' ? 'n' : 'b';
     gmap[u.username.toLowerCase()] = [u.id, code, followingLabel(u, code)];
   }
   const gqueue = [...G.notback].sort(SORTS.dead.cmp).map((u) => [u.username.toLowerCase(), u.id]);
@@ -150,10 +187,11 @@ async function publish() {
 }
 function followingLabel(u, code) {
   if (code === 'u') return 'Marked unfollowed';
-  if (code === 'b') return 'Follows you back';
+  if (code === 'b') return `Keep · ${FWHY[u._fwhy] || 'kept'}`;
   const hints = u._sig.filter((s) => s.key !== 'tiny').slice(0, 2).map((s) => s.label);
-  return ["Doesn't follow you back", ...hints].join(' · ');
+  return [u.followsYou === false ? "Doesn't follow you back" : 'Unfollow', ...hints].join(' · ');
 }
+const FWHY = { back: 'follows you back', verified: 'has a checkmark', followers: 'big account', active: 'posted recently' };
 function verdictLabel(u, c, code) {
   if (code === 'd') return 'Marked removed';
   if (code === 'k') return `Keep · ${reasonText(c, u, S.rules)}`;
@@ -340,7 +378,9 @@ const FRAME = {
   following: () => `
 <div class="side" id="side"></div>
 <section id="fsummary" class="summary"></section>
-<div class="work fwork">
+<div class="review fwork">
+  <aside class="card rules" id="frules"${S.gmeta ? '' : ' hidden'}>${frulesHtml()}</aside>
+  <div class="work">
   <section class="card methods"><div class="mbody" id="fmethod"></div></section>
   <section class="card listcard" id="flistcard">
     <div class="listbar">
@@ -352,6 +392,7 @@ const FRAME = {
     </div>
     <div id="flist"></div>
   </section>
+  </div>
 </div>`,
 
   review: () => `
@@ -390,6 +431,8 @@ const FILL = {
     patch($('#fsummary'), fsummaryHtml());
     patch($('#fmethod'), fmethodHtml());
     $('#flistcard').hidden = !S.gmeta;
+    $('#frules').hidden = !S.gmeta;
+    updateFcounts();
     patch($('#ftabs'), ftabsHtml());
     patch($('#flist'), flistHtml());
   },
@@ -633,7 +676,31 @@ function fsummaryHtml() {
   const info = S.demo
     ? '<span>Sample data, nothing was read from X.</span>'
     : `<span>Scanned ${ago(Date.now() - S.gmeta.scannedAt)}. A re-scan confirms unfollows.</span>${S.mode ? '<button class="btn sm" data-act="scan-following">Re-scan following</button>' : ''}`;
-  return stat('', c.total, 'you follow') + stat('rem', c.notback, "don't follow back") + stat('', c.dead, 'of them look dead') + stat('done', S.unf.size, 'unfollowed') + `<div class="scaninfo">${info}</div>`;
+  return stat('', c.total, 'you follow') + stat('', c.notFollowing, "don't follow back") + stat('rem', c.notback, 'to unfollow') + stat('done', S.unf.size, 'unfollowed') + `<div class="scaninfo">${info}</div>`;
+}
+
+function frulesHtml() {
+  const r = S.frules || normalizeFrules();
+  const box = (key) => `<input type="checkbox" data-frule="${key}"${r[key] ? ' checked' : ''}>`;
+  return `<h2>Keep rules</h2>
+  <label class="rule">${box('keepBack')}<span class="rt">Keep people who follow you back</span><span class="rc" data-fcount="back"></span></label>
+  <label class="rule">${box('keepVerified')}<span class="rt">Keep accounts with a checkmark<small>Blue is X Premium, gold a business, grey a government.</small></span><span class="rc" data-fcount="verified"></span></label>
+  <label class="rule">${box('minOn')}<span class="rt">Keep accounts with at least <input class="num-in" type="number" min="1" step="100" data-frule="minFollowers" value="${r.minFollowers}" aria-label="Minimum followers"> followers</span><span class="rc" data-fcount="followers"></span></label>
+  <label class="rule">${box('inactiveOn')}<span class="rt">Only unfollow accounts silent for <input class="num-in" type="number" min="1" max="3650" data-frule="inactiveDays" value="${r.inactiveDays}" aria-label="Days without a post"> days<small>The number is how many have not posted for that long.</small></span><span class="rc" data-fcount="silent"></span></label>
+  <div class="total"><span>To unfollow</span><b data-fcount="unfollow"></b></div>`;
+}
+
+function updateFcounts() {
+  const c = G.counts, rs = c.reasons || {}, r = S.frules || normalizeFrules();
+  const put = (key, on, n) => {
+    const el = document.querySelector(`[data-fcount="${key}"]`);
+    if (el) el.textContent = on ? fmtInt(n || 0) : 'off';
+  };
+  put('back', r.keepBack, rs.back);
+  put('verified', r.keepVerified, rs.verified);
+  put('followers', r.minOn, rs.followers);
+  put('silent', true, c.silent);
+  put('unfollow', true, c.notback);
 }
 
 function fmethodHtml() {
@@ -644,7 +711,7 @@ function fmethodHtml() {
       <p>Sweep reads the ${fmtInt(n)} accounts you follow, then shows who doesn't follow you back and who looks dead. That's ${fmtInt(n)} reads, about ${fmtUsd(n * readPrice())}.</p>
       <div class="actions"><button class="btn primary" data-act="scan-following"${off || (S.mode ? '' : ' disabled')}>Scan who I follow</button>${S.mode ? '' : '<span class="fine">Sign in or add the Bearer Token first.</span>'}</div>`;
   }
-  return `<p>Open your Following list on X and Sweep marks every row: <span class="pill rem">Doesn't follow back</span> or <span class="pill keep">Follows back</span>. To unfollow, click the <b>Following</b> button on the row, then <b>Unfollow</b>.</p>
+  return `<p>Open your Following list on X and Sweep marks every row: <span class="pill rem">Unfollow</span> or <span class="pill keep">Keep</span>, following the rules on the left. To unfollow, click the <b>Following</b> button on the row, then <b>Unfollow</b>.</p>
     <div class="actions"><button class="btn primary" data-act="open-following"${off}>Open my Following on X</button>
       ${G.notback.length ? `<button class="btn" data-act="fqueue-start"${off}>One by one, deadest first</button>` : ''}</div>
     <p class="fine">X bans mass and automatic unfollowing, especially of people who don't follow back, so Sweep never unfollows for you. Unfollows show up here after a re-scan, or right away when you use "One by one".</p>${S.demo ? '<p class="fine">Sample mode: these buttons are off because the sample accounts don\'t exist on X.</p>' : ''}`;
@@ -652,7 +719,7 @@ function fmethodHtml() {
 
 function ftabsHtml() {
   const t = (k, label, n) => `<button role="tab" aria-selected="${S.fview === k}" data-act="fview" data-fview="${k}">${label}<span class="cnt">${fmtInt(n)}</span></button>`;
-  return t('notback', "Don't follow back", G.notback.length) + t('back', 'Follow back', G.back.length) + t('done', 'Unfollowed', S.unf.size);
+  return t('notback', 'To unfollow', G.notback.length) + t('back', 'Keeping', G.back.length) + t('done', 'Unfollowed', S.unf.size);
 }
 
 let flistCache = null;
@@ -671,7 +738,7 @@ function flistHtml() {
   if (!S.gmeta) return '';
   const items = flistItems();
   if (!items.length) {
-    const why = S.fq ? `No match for “${esc(S.fq)}”.` : { notback: 'Everyone you follow follows you back.', back: 'Nobody here yet.', done: 'Nothing unfollowed yet.' }[S.fview];
+    const why = S.fq ? `No match for “${esc(S.fq)}”.` : { notback: 'Nobody to unfollow with these rules.', back: 'Nobody is kept with these rules.', done: 'Nothing unfollowed yet.' }[S.fview];
     return `<div class="empty">${why}</div>`;
   }
   const rows = items.slice(0, S.flimit).map(followingRow).join('');
@@ -684,7 +751,8 @@ function followingRow(u) {
   const lp = lastPostAt(u);
   const last = u.posts === 0 ? 'never' : lp == null ? 'hidden' : ago(Date.now() - lp);
   const mark = S.unf.get(u.id);
-  const rel = u.followsYou == null ? '' : u.followsYou ? '<span class="pill keep">Follows you</span>' : '<span class="pill rem">Doesn\'t follow back</span>';
+  const rel = (u.followsYou == null ? '' : u.followsYou ? '<span class="pill keep">Follows you</span>' : '<span class="pill rem">Doesn\'t follow back</span>')
+    + (u._fwhy && u._fwhy !== 'unfollow' && u._fwhy !== 'back' && !mark ? `<span class="pill keep">Keep · ${FWHY[u._fwhy]}</span>` : '');
   const chips = u._sig.filter((s) => s.key !== 'tiny').slice(0, 3).map((s) => `<span class="chip">${esc(s.label)}</span>`).join('');
   const state = mark ? `<span class="chip${mark.confirmed ? ' ok' : ''}">${mark.confirmed ? 'unfollow confirmed' : 'marked unfollowed, re-scan to confirm'}</span>` : '';
   const btn = mark
@@ -991,6 +1059,13 @@ document.addEventListener('change', async (e) => {
     if (el.type !== 'checkbox') el.value = v;
     S.cfg[key] = v;
     await saveCfg();
+  } else if (el.dataset.frule) {
+    const key = el.dataset.frule;
+    S.frules = normalizeFrules({ ...S.frules, [key]: el.type === 'checkbox' ? el.checked : Number(el.value) });
+    if (el.type !== 'checkbox') el.value = S.frules[key];
+    await store.set('frules', S.frules);
+    deriveFollowing();
+    publishSoon();
   } else if (el.id === 'fsort') {
     S.fsort = el.value;
     S.flimit = PAGE;

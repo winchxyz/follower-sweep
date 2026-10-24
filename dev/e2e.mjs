@@ -277,6 +277,20 @@ try {
   check((await store())[`uf:${fv[0]}`]?.via === 'detected', `unfollow on the profile is noticed (@${fh})`);
   await xp.screenshot({ path: join(SHOTS, '21-x-following-profile.png') });
   await app.bringToFront();
+  // Following rules: keeping big accounts shrinks the unfollow list; the silent count moves with the days
+  const toUnfollow = async () => Number((await app.textContent('[data-fcount="unfollow"]')).replace(/,/g, ''));
+  const before = await toUnfollow();
+  await app.click('input[data-frule="keepBack"]');
+  await app.waitForFunction((n) => Number(document.querySelector('[data-fcount="unfollow"]').textContent.replace(/,/g, '')) > n, before);
+  check(true, `turning off "keep people who follow back" grows the unfollow list (${before} -> ${await toUnfollow()})`);
+  await app.click('input[data-frule="keepVerified"]');
+  await app.waitForTimeout(200);
+  const silent30 = async (d) => { await app.fill('input[data-frule="inactiveDays"]', String(d)); await app.press('input[data-frule="inactiveDays"]', 'Enter'); await app.waitForTimeout(200); return Number((await app.textContent('[data-fcount="silent"]')).replace(/,/g, '')); };
+  const s30 = await silent30(30), s365 = await silent30(365);
+  check(s30 >= s365, `Following silent count shrinks with more days (${s30} >= ${s365})`);
+  await shot('22-following-rules.png');
+  await app.click('input[data-frule="keepBack"]');
+  await app.click('input[data-frule="keepVerified"]');
   await app.click('button[data-side="followers"]');
 
   await app.click('button[data-view="remove"]');

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Sweep: follower cleanup for X",
   "short_name": "Sweep",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Finds followers without a checkmark and under 5,000 followers with the official X API, and marks them on your Followers page.",
   "minimum_chrome_version": "116",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8WQVJqc8Te6JBMaeDlEcxpEptPlakPNAvhPYGyZ8+4C91MGTWxQ6+dL34bASKEvySRWXg/jol7AgJHaPW7HcZMe1HxXBQeIe6noJ3ysLRaEiWaXlKGX4w/B1TfVZvI5Oz0YTGLUZd6LGfoEFWi+vIHVfe0yZutif5ZYlglnmoDMdCOjYCC9p+6roWXhBez1YfYNe/fNSC4msqaKSSOEaXuqs+yX6rVcX3UF/26uiVnelTBOVq4FCZtfu8UmUtY/MkcA/7vudy0khHZxKQ/BCTjqFJSY4Z6aDkEfT5Gy39Pj8QWU/4s+zpjQK54nIQFtZ+/hLzZ30PIUQuf0erl6SVwIDAQAB",

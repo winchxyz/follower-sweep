@@ -1,6 +1,6 @@
 {
   "name": "follower-sweep",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Chrome extension that finds dead X followers with the official X API and marks them for removal, within X's rules.",
   "type": "module",

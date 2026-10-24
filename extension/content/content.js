@@ -148,7 +148,7 @@
       if (v[1] === 'n') n++;
       else if (v[1] === 'b') b++;
     }
-    mount(`${LOGO}<div class="txt"><div class="line"><b>Sweep</b> · <span class="tag r">NO FOLLOW-BACK</span>${n.toLocaleString('en-US')} <span class="tag k">FOLLOWS YOU</span>${b.toLocaleString('en-US')}</div>
+    mount(`${LOGO}<div class="txt"><div class="line"><b>Sweep</b> · <span class="tag r">UNFOLLOW</span>${n.toLocaleString('en-US')} <span class="tag k">KEEP</span>${b.toLocaleString('en-US')}</div>
       <div class="hint line">On a red row: Following → Unfollow. Re-scan who you follow in Sweep afterwards.</div></div>
       <div class="btns"><label><input type="checkbox" data-dim${S.dim ? ' checked' : ''}> Fade green</label><button data-do="app">Open Sweep</button><button class="x" data-do="hide" title="Hide">×</button></div>`);
   }
@@ -274,10 +274,10 @@
       html = `<div class="txt"><div class="line"><span class="tag d">UNFOLLOWED</span><b>@${esc(p.handle)}</b> ${p.marked === 'detected' ? 'unfollowed' : 'marked as unfollowed'}</div>
         <div class="hint line">A re-scan of who you follow confirms it.</div></div><div class="btns"><button data-do="undo-unf">Undo</button>${nextBtn}</div>`;
     } else if (p.code === 'b') {
-      html = `<div class="txt"><div class="line"><span class="tag k">FOLLOWS YOU</span><b>@${esc(p.handle)}</b> follows you back</div>
-        <div class="hint line">You follow each other.</div></div><div class="btns">${nextBtn}</div>`;
+      html = `<div class="txt"><div class="line"><span class="tag k">KEEP</span><b>@${esc(p.handle)}</b> · ${esc(p.label.replace(/^Keep · /, ''))}</div>
+        <div class="hint line">Sweep keeps this account.</div></div><div class="btns">${nextBtn}</div>`;
     } else {
-      html = `<div class="txt"><div class="line"><span class="tag r">NO FOLLOW-BACK</span><b>@${esc(p.handle)}</b> · ${esc(p.label.replace(/^Doesn't follow you back( · )?/, '') || "doesn't follow you back")}</div>
+      html = `<div class="txt"><div class="line"><span class="tag r">UNFOLLOW</span><b>@${esc(p.handle)}</b> · ${esc(p.label.replace(/^(Doesn't follow you back|Unfollow)( · )?/, '') || "doesn't follow you back")}</div>
         <div class="hint line">Here: Following → Unfollow, then Next.</div></div>
         <div class="btns"><button data-do="mark-unf">Mark unfollowed</button>${p.next ? '<button data-do="next">Skip →</button>' : ''}</div>`;
     }
