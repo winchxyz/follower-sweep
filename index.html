@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sweep: clean dead X followers</title>
+<meta name="description" content="Free, open-source Chrome extension that finds dead followers on your X account with the official API and marks them for removal, without breaking X's rules.">
+<meta property="og:title" content="Sweep: clean dead X followers">
+<meta property="og:description" content="Official X API only. About $1 per 1,000 followers. Your data stays in your browser.">
+<meta property="og:image" content="https://winchxyz.github.io/follower-sweep/docs/review.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:creator" content="@winchxyz">
+<link rel="icon" href="extension/icons/32.png">
+<style>
+:root {
+  --bg: #f3f2ee; --panel: #fff; --ink: #151515; --ink-2: #3b3b39; --muted: #74736d;
+  --line: #e4e2da; --red: #d63a1c; --red-soft: #fbe9e3; --green: #17784c; --green-soft: #e1f1e8;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0f0f0e; --panel: #181817; --ink: #f2f1ec; --ink-2: #d3d1ca; --muted: #97958e;
+    --line: #2b2b29; --red: #ff6b4d; --red-soft: #3a1b14; --green: #43cf90; --green-soft: #11281d; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 17px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif; }
+a { color: inherit; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+nav { display: flex; align-items: center; justify-content: space-between; height: 68px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 22px; letter-spacing: -0.03em; text-decoration: none; }
+.brand img { width: 32px; height: 32px; border-radius: 8px; }
+nav .links { display: flex; gap: 20px; font-size: 15px; color: var(--ink-2); }
+nav .links a { text-decoration: none; }
+nav .links a:hover { color: var(--ink); }
+.hero { padding: 56px 0 36px; text-align: center; }
+.eyebrow { display: inline-block; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--green); background: var(--green-soft); border-radius: 999px; padding: 4px 12px; margin-bottom: 20px; }
+h1 { font-size: clamp(38px, 6vw, 64px); line-height: 1.04; letter-spacing: -0.04em; margin: 0 auto 18px; max-width: 14ch; }
+h1 em { font-style: normal; color: var(--red); }
+.lede { font-size: 20px; color: var(--ink-2); max-width: 46ch; margin: 0 auto 30px; }
+.cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 8px; height: 50px; padding: 0 22px; border-radius: 12px;
+  font-weight: 650; font-size: 16px; text-decoration: none; border: 1px solid var(--line); background: var(--panel); }
+.btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.btn:hover { transform: translateY(-1px); }
+.fine { color: var(--muted); font-size: 14px; margin-top: 14px; }
+.shot { margin: 44px auto 0; border-radius: 16px; border: 1px solid var(--line); overflow: hidden; background: var(--panel);
+  box-shadow: 0 20px 60px rgba(0,0,0,.12); }
+.shot img { display: block; width: 100%; height: auto; }
+section { padding: 64px 0 8px; }
+h2 { font-size: clamp(28px, 4vw, 38px); letter-spacing: -0.03em; margin: 0 0 10px; }
+.sub { color: var(--ink-2); margin: 0 0 28px; max-width: 60ch; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 20px 22px; }
+.card b { display: block; font-size: 17px; margin-bottom: 4px; }
+.card span { color: var(--ink-2); font-size: 15px; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.pair img { width: 100%; border-radius: 14px; border: 1px solid var(--line); display: block; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; font-size: 15px; }
+th, td { text-align: left; padding: 13px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.yes { color: var(--green); font-weight: 650; } .no { color: var(--red); font-weight: 650; }
+ol.steps { padding-left: 22px; margin: 0; } ol.steps li { margin-bottom: 10px; color: var(--ink-2); } ol.steps b { color: var(--ink); }
+code { font: 14px ui-monospace, "SF Mono", Menlo, monospace; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; word-break: break-all; }
+.final { text-align: center; padding: 72px 0; }
+footer { border-top: 1px solid var(--line); padding: 24px 0 40px; color: var(--muted); font-size: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+@media (max-width: 700px) { nav .links a.hide { display: none; } .pair { grid-template-columns: 1fr; } .lede { font-size: 18px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="./"><img src="extension/icons/128.png" alt="">Sweep</a>
+    <div class="links">
+      <a class="hide" href="#how">How it works</a>
+      <a class="hide" href="#install">Install</a>
+      <a href="https://github.com/winchxyz/follower-sweep">GitHub</a>
+      <a href="https://x.com/winchxyz">@winchxyz</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <span class="eyebrow">Free · open source · official X API</span>
+    <h1>Clean <em>dead followers</em> off your X account</h1>
+    <p class="lede">Sweep finds the bots and ghosts among your followers and marks them on your Followers page, without breaking X's rules.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/winchxyz/follower-sweep/releases/latest">Download for Chrome</a>
+      <a class="btn" href="https://github.com/winchxyz/follower-sweep">★ Star on GitHub</a>
+    </div>
+    <p class="fine">Works in Chrome, Edge, Brave and Arc · about $1 per 1,000 followers, paid to X directly</p>
+    <div class="shot"><img src="docs/review.png" alt="Sweep's review page: followers scanned, kept and to remove, with keep rules and a list sorted deadest first"></div>
+  </header>
+
+  <section id="how">
+    <h2>What it does</h2>
+    <p class="sub">Scan once, review in seconds, then remove with X's own menu.</p>
+    <div class="grid">
+      <div class="card"><b>Scans every follower</b><span>Through the official API, 1,000 per request. Resumable if you close the tab.</span></div>
+      <div class="card"><b>Keeps who matters</b><span>Checkmarks, big accounts, people you follow and subscribers stay. Every rule is a toggle.</span></div>
+      <div class="card"><b>Deadest first</b><span>No posts, default avatar, silent for a year, follows thousands with no followers.</span></div>
+      <div class="card"><b>Marks them on x.com</b><span>Red "Remove" and green "Keep" labels on your Followers page, with the reason.</span></div>
+      <div class="card"><b>One by one</b><span>Walks you through profiles and notices when "Follows you" disappears.</span></div>
+      <div class="card"><b>Private</b><span>No server, no account, no analytics. Everything stays in your browser.</span></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="pair">
+      <img src="docs/x-followers.png" alt="Red and green Sweep marks on the X Followers page">
+      <img src="docs/x-profile.png" alt="Sweep's bar on a follower's profile">
+    </div>
+  </section>
+
+  <section>
+    <h2>Within X's rules, on purpose</h2>
+    <p class="sub">Tools that click on x.com for you risk permanent suspension. Sweep never does.</p>
+    <table>
+      <tr><th></th><th>X's rules</th><th>Sweep</th></tr>
+      <tr><td>Reading your followers</td><td>Allowed through the API</td><td class="yes">Official endpoint</td></tr>
+      <tr><td>Bots clicking on x.com</td><td>Banned, permanent suspension</td><td class="no">Never</td></tr>
+      <tr><td>The "Remove follower" click</td><td>No API for it</td><td>Yours, in X's own menu</td></tr>
+    </table>
+  </section>
+
+  <section id="install">
+    <h2>Install in two minutes</h2>
+    <ol class="steps">
+      <li><b>Download</b> <code>sweep-extension.zip</code> from the <a href="https://github.com/winchxyz/follower-sweep/releases/latest">latest release</a> and unzip it.</li>
+      <li>Open <code>chrome://extensions</code>, turn on <b>Developer mode</b>, click <b>Load unpacked</b> and pick the folder.</li>
+      <li>Create an app at <a href="https://console.x.com">console.x.com</a> (OAuth 2.0, Native App, Read) with the callback <code>https://ojfmjajpdhdpjekhnlmjpphmmmngochn.chromiumapp.org/x</code>.</li>
+      <li>Paste the <b>Client ID</b> into Sweep and scan. Or click <b>Try it with sample followers</b> first.</li>
+    </ol>
+    <p class="fine">Full guide and troubleshooting in the <a href="https://github.com/winchxyz/follower-sweep#readme">README</a>.</p>
+  </section>
+
+  <section class="final">
+    <h2>If Sweep saved you an afternoon</h2>
+    <p class="sub" style="margin: 0 auto 26px">A star helps other people find it, and a follow gets you the next tools.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/winchxyz/follower-sweep">★ Star on GitHub</a>
+      <a class="btn" href="https://x.com/winchxyz">Follow @winchxyz</a>
+    </div>
+  </section>
+
+  <footer>
+    <span>MIT license · not affiliated with X Corp.</span>
+    <span>Made by <a href="https://x.com/winchxyz">@winchxyz</a></span>
+  </footer>
+</div>
+</body>
+</html>
