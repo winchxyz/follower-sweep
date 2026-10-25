@@ -39,7 +39,17 @@ function colorAt(x, y) {
   return INK;
 }
 
-function render(size) {
+const render = (size) => png(size, size, rasterize(size));
+
+// Chrome Web Store icon: 128x128 canvas, 96x96 artwork centred, 16 px transparent margin.
+function storeIcon() {
+  const art = rasterize(96);
+  const px = Buffer.alloc(128 * 128 * 4);
+  for (let y = 0; y < 96; y++) art.copy(px, ((y + 16) * 128 + 16) * 4, y * 96 * 4, (y + 1) * 96 * 4);
+  return png(128, 128, px);
+}
+
+function rasterize(size) {
   const px = Buffer.alloc(size * size * 4);
   const n = 4;
   for (let y = 0; y < size; y++) {
@@ -59,7 +69,7 @@ function render(size) {
       }
     }
   }
-  return png(size, size, px);
+  return px;
 }
 
 const CRC = new Int32Array(256).map((_, n) => {
@@ -96,3 +106,6 @@ for (const size of [16, 32, 48, 128]) {
   writeFileSync(join(OUT, `${size}.png`), render(size));
   console.log(`icons/${size}.png`);
 }
+mkdirSync(join(OUT, '..', '..', 'store'), { recursive: true });
+writeFileSync(join(OUT, '..', '..', 'store', 'store-icon-128.png'), storeIcon());
+console.log('store/store-icon-128.png');
