@@ -102,7 +102,7 @@ const ctx = await chromium.launchPersistentContext(profile, {
   executablePath: findChromium(),
   headless: !process.env.HEADED,
   args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`],
-  viewport: { width: 1280, height: 860 },
+  viewport: { width: 1280, height: Number(process.env.SHOT_HEIGHT) || 860 },
 });
 
 const errors = [];
